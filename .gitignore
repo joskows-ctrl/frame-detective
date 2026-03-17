@@ -8,3 +8,5 @@ rife/
 test_interp.py
 test_interp_v2.py
 frame_detective_v2.py
+frame_detective_env/
+cpu_build_env/
