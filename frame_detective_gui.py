@@ -150,8 +150,8 @@ class FrameDetectiveApp:
         ttk.Label(settings_inner2, text="Fill mode:", style="Dark.TLabel").pack(side=tk.LEFT)
         self.fill_mode_var = tk.StringVar(value="RIFE (AI)")
         self.fill_mode_combo = ttk.Combobox(settings_inner2, textvariable=self.fill_mode_var,
-                                             values=["Black", "White", "Blend (debug)", "RIFE (AI)", "RIFE + Labels"],
-                                             state="readonly", width=18)
+                                             values=["Black", "White", "Blend (debug)", "RIFE (AI)", "RIFE + Labels", "Duplicate (Fix Externally)"],
+                                             state="readonly", width=22)
         self.fill_mode_combo.pack(side=tk.LEFT, padx=(4, 0))
 
         # Full precision toggle (for RIFE)
@@ -825,8 +825,18 @@ class FrameDetectiveApp:
         for child in row.winfo_children():
             child.bind("<Enter>", _on_row_enter)
 
-        # Redraw chart when value changes to update bar colors
-        var.trace_add("write", lambda *_: self.draw_chart())
+        # Clamp dip values to 0-1 and redraw chart when value changes
+        def _on_var_change(*_):
+            if kind == "dip":
+                try:
+                    v = var.get()
+                    if v > 1:
+                        var.set(1)
+                        return  # set triggers another call
+                except (tk.TclError, ValueError):
+                    pass
+            self.draw_chart()
+        var.trace_add("write", _on_var_change)
 
         self.spike_entries[frame_num] = var
         self.spike_auto_counts[frame_num] = insert_count
@@ -899,10 +909,13 @@ class FrameDetectiveApp:
             var.set(auto)
 
     def set_all_manual(self):
-        """Set all spike rows to the bulk count value."""
+        """Set all spike rows to the bulk count value. Dips capped at 0-1."""
         count = self.bulk_count_var.get()
-        for var in self.spike_entries.values():
-            var.set(count)
+        for frame_num, var in self.spike_entries.items():
+            if frame_num in self.dip_entries:
+                var.set(min(count, 1))  # Dips can only be 0 or 1
+            else:
+                var.set(count)
 
     def draw_chart(self):
         """Draw motion magnitude chart on canvas with zoom support."""
@@ -1835,11 +1848,26 @@ class FrameDetectiveApp:
                 class FFmpegWriter:
                     def __init__(self, proc):
                         self.proc = proc
+                        self._stderr_lines = []
+                        # Drain stderr in background to prevent pipe deadlock
+                        def _drain():
+                            for line in proc.stderr:
+                                self._stderr_lines.append(line)
+                        self._drain_thread = threading.Thread(target=_drain, daemon=True)
+                        self._drain_thread.start()
                     def write(self, frame):
-                        self.proc.stdin.write(frame.tobytes())
+                        try:
+                            self.proc.stdin.write(frame.tobytes())
+                        except (BrokenPipeError, OSError) as e:
+                            stderr = b"".join(self._stderr_lines).decode(errors="replace")
+                            raise RuntimeError(f"FFmpeg pipe broke: {e}\n{stderr[-500:]}")
                     def release(self):
                         self.proc.stdin.close()
+                        self._drain_thread.join(timeout=10)
                         self.proc.wait()
+                        if self.proc.returncode != 0:
+                            stderr = b"".join(self._stderr_lines).decode(errors="replace")
+                            raise RuntimeError(f"FFmpeg failed (code {self.proc.returncode}):\n{stderr[-500:]}")
 
                 if use_prores and has_ffmpeg:
                     # ProRes HQ via FFmpeg
@@ -1891,9 +1919,12 @@ class FrameDetectiveApp:
                 done = 0
                 last_written = None  # track last frame we actually wrote
 
+                topaz_prep = (fill_mode == "Duplicate (Fix Externally)")
+
                 for i, (frame_idx, frame) in enumerate(self.frames_data):
                     # --- Dip: skip (delete) the duplicate frame entirely ---
-                    if frame_idx in replace_plan:
+                    # In Topaz Prep mode, ignore dips — pass them through for Topaz to handle
+                    if frame_idx in replace_plan and not topaz_prep:
                         removed += 1
                         done += 1
                         self.root.after(0, lambda d=done, tf=total_fixes, fi=frame_idx: self.set_status(
@@ -1942,6 +1973,13 @@ class FrameDetectiveApp:
                                 self._burn_label(interp, label)
                                 out.write(interp)
 
+                            elif fill_mode == "Duplicate (Fix Externally)":
+                                # Duplicate the previous frame so Topaz sees it and replaces it
+                                if prev_frame is not None:
+                                    out.write(prev_frame)
+                                else:
+                                    out.write(frame)
+
                             inserted += 1
 
                         done += 1
@@ -1950,7 +1988,15 @@ class FrameDetectiveApp:
                         ))
 
                     # Write the original frame (spike frames stay, normal frames stay)
-                    out.write(frame)
+                    if fill_mode == "RIFE + Labels":
+                        labeled = np.ascontiguousarray(frame.copy())
+                        label = f"F{frame_idx}"
+                        if frame_idx in insert_plan:
+                            label += " [SPIKE]"
+                        self._burn_label(labeled, label)
+                        out.write(labeled)
+                    else:
+                        out.write(frame)
                     last_written = frame
 
                 out.release()
