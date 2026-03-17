@@ -11,6 +11,8 @@ from pathlib import Path
 import threading
 import subprocess
 import shutil
+import webbrowser
+import sys
 
 
 class FrameDetectiveApp:
@@ -20,6 +22,17 @@ class FrameDetectiveApp:
         self.root.geometry("1100x920")
         self.root.configure(bg="#1a1a1a")
         self.root.resizable(True, True)
+
+        # Set window icon
+        try:
+            if getattr(sys, 'frozen', False):
+                icon_path = Path(sys._MEIPASS) / "fd_icon.ico"
+            else:
+                icon_path = Path(__file__).parent / "fd_icon.ico"
+            if icon_path.exists():
+                self.root.iconbitmap(str(icon_path))
+        except Exception:
+            pass
 
         self.video_path = None
         self.magnitudes = []
@@ -58,10 +71,41 @@ class FrameDetectiveApp:
         main = ttk.Frame(self.root, style="Dark.TFrame", padding=20)
         main.pack(fill=tk.BOTH, expand=True)
 
-        # Title
-        ttk.Label(main, text="Frame Detective V1", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(main, text="Detect missing frames in AI-generated video",
-                  style="Info.TLabel").pack(anchor="w", pady=(0, 16))
+        # Title row with logo
+        title_row = ttk.Frame(main, style="Dark.TFrame")
+        title_row.pack(fill=tk.X, pady=(0, 8))
+
+        # Load logo image
+        self._logo_img = None
+        try:
+            from PIL import Image, ImageTk
+            if getattr(sys, 'frozen', False):
+                logo_path = Path(sys._MEIPASS) / "FDIcon.png"
+            else:
+                logo_path = Path(__file__).parent / "FDIcon.png"
+            if logo_path.exists():
+                logo_raw = Image.open(str(logo_path))
+                # Scale to 160px tall, keep aspect ratio
+                target_h = 160
+                ratio = logo_raw.size[0] / logo_raw.size[1]
+                target_w = int(target_h * ratio)
+                logo_resized = logo_raw.resize((target_w, target_h), Image.LANCZOS)
+                self._logo_img = ImageTk.PhotoImage(logo_resized)
+        except Exception:
+            pass
+
+        if self._logo_img:
+            logo_label = tk.Label(title_row, image=self._logo_img, bg="#1a1a1a")
+            logo_label.pack(side=tk.LEFT)
+        else:
+            ttk.Label(title_row, text="Frame Detective V1", style="Title.TLabel").pack(side=tk.LEFT)
+
+        # Website link button
+        ha_btn = tk.Button(title_row, text="highlyappropriate.com", fg="#6699cc",
+                            bg="#1a1a1a", activeforeground="#88bbee", activebackground="#1a1a1a",
+                            bd=0, cursor="hand2", font=("Segoe UI", 9, "underline"),
+                            command=lambda: webbrowser.open("https://highlyappropriate.com"))
+        ha_btn.pack(side=tk.RIGHT, anchor="s", pady=(0, 4))
 
         # File selection row
         file_frame = ttk.Frame(main, style="Dark.TFrame")
