@@ -1,22 +1,26 @@
-# Frame Detective V1
+# Frame Detective V3
 
 Detect and fix missing or duplicate frames in AI-generated video.
 
 By Jonah Oskow
 
-![Frame Detective](https://img.shields.io/badge/version-1.0-blue)
+![Frame Detective](https://img.shields.io/badge/version-3.0-blue)
 
 ## What It Does
 
 Frame Detective analyzes video frame-by-frame using optical flow to find:
-- **Spikes** (red) — Missing frames where motion jumps unnaturally. Fixed by inserting AI-interpolated frames using RIFE.
-- **Dips** (yellow) — Duplicate/near-duplicate frames that cause stuttering. Fixed by deleting the duplicate.
+- **Spikes** (red) — Missing frames where motion jumps unnaturally.
+- **Dips** (yellow) — Duplicate/near-duplicate frames that cause stuttering.
 
 Interactive chart with zoom, playback controls, and per-frame preview lets you review and fine-tune detections before fixing.
 
-## Quick Start (Pre-built EXE)
+## V3 Changes
 
-Download `FrameDetectiveV1.exe` from the [Releases](https://github.com/joskows-ctrl/frame-detective/releases) page. No installation needed. This version runs on CPU.
+- Separate threshold sliders for spikes and dips (adjust without re-analyzing)
+- Ignore toggles to disable spike or dip detection independently
+- Three output routes: Prep for External Solve, Internal Solve (RIFE AI), Debug
+- Output format selection upfront (H.264 or ProRes HQ)
+- Dips are replaced (not deleted) — video duration is preserved
 
 ## GPU Install (Recommended for Speed)
 
@@ -45,13 +49,14 @@ frame_detective_env\Scripts\pip install torch torchvision --index-url https://do
 
 ## Features
 
-- Optical flow spike and dip detection with adjustable threshold
+- Separate spike and dip threshold sliders with instant re-detection
+- Ignore toggles for spikes and dips
 - RIFE v4.26 AI frame interpolation (GPU accelerated)
+- Three output routes: Prep for External, Internal Solve, Debug
 - Interactive motion chart with zoom and moveable cursor
 - Video playback with speed control and loop
 - In/Out points for selective fixing
 - Per-frame review and manual adjustment
-- Fix modes: Spikes Only, Dips Only, Spikes + Dips
 - H.264 (25Mbps via FFmpeg) and ProRes HQ output
 
 ## Requirements

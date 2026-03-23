@@ -18,7 +18,6 @@ import subprocess
 import shutil
 import webbrowser
 import os
-import json
 
 # Hide console window for subprocesses on Windows (needed for exe builds)
 _SUBPROCESS_FLAGS = 0
@@ -29,7 +28,7 @@ if sys.platform == "win32":
 class FrameDetectiveApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Frame Detective V3")
+        self.root.title("Frame Detective V1")
         self.root.geometry("1100x920")
         self.root.configure(bg="#1a1a1a")
         self.root.resizable(True, True)
@@ -51,7 +50,6 @@ class FrameDetectiveApp:
         self.spikes = []
         self.dips = []
         self.dip_entries = set()
-        self.user_overrides = {}  # frame_num -> {"type": "spike"|"dip", "count": int}
         self.fps = 0
         self.width = 0
         self.height = 0
@@ -79,44 +77,9 @@ class FrameDetectiveApp:
                          font=("Segoe UI", 10, "bold"))
 
     def build_ui(self):
-        # Scrollable main container
-        outer = ttk.Frame(self.root, style="Dark.TFrame")
-        outer.pack(fill=tk.BOTH, expand=True)
-
-        self._main_canvas = tk.Canvas(outer, bg="#1a1a1a", highlightthickness=0)
-        main_scrollbar = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=self._main_canvas.yview)
-        main_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self._main_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self._main_canvas.configure(yscrollcommand=main_scrollbar.set)
-
-        main = ttk.Frame(self._main_canvas, style="Dark.TFrame", padding=20)
-        self._main_canvas.create_window((0, 0), window=main, anchor="nw")
-
-        def _on_main_configure(event):
-            self._main_canvas.configure(scrollregion=self._main_canvas.bbox("all"))
-            # Match the inner frame width to the canvas width
-            self._main_canvas.itemconfig(self._main_canvas.find_withtag("all")[0],
-                                          width=self._main_canvas.winfo_width())
-        main.bind("<Configure>", _on_main_configure)
-        self._main_canvas.bind("<Configure>",
-            lambda e: self._main_canvas.itemconfig(
-                self._main_canvas.find_withtag("all")[0], width=e.width))
-
-        # Global mousewheel scrolling for the main canvas
-        # Only scroll main canvas if not over chart or spike table
-        def _on_main_mousewheel(event):
-            # Check if the event widget is inside the chart or spike table
-            w = event.widget
-            try:
-                # Walk up parents to see if we're inside chart or spike table
-                while w:
-                    if w == self.canvas or w == getattr(self, '_spike_canvas', None):
-                        return  # let the chart zoom / spike table scroll handle it
-                    w = w.master
-            except (AttributeError, tk.TclError):
-                pass
-            self._main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        self._main_canvas.bind_all("<MouseWheel>", _on_main_mousewheel)
+        # Main container
+        main = ttk.Frame(self.root, style="Dark.TFrame", padding=20)
+        main.pack(fill=tk.BOTH, expand=True)
 
         # Title row with logo
         title_row = ttk.Frame(main, style="Dark.TFrame")
@@ -145,7 +108,7 @@ class FrameDetectiveApp:
             logo_label = tk.Label(title_row, image=self._logo_img, bg="#1a1a1a")
             logo_label.pack(side=tk.LEFT)
         else:
-            ttk.Label(title_row, text="Frame Detective V3", style="Title.TLabel").pack(side=tk.LEFT)
+            ttk.Label(title_row, text="Frame Detective V1", style="Title.TLabel").pack(side=tk.LEFT)
 
         # Website link button
         ha_btn = tk.Button(title_row, text="highlyappropriate.com", fg="#6699cc",
@@ -165,83 +128,111 @@ class FrameDetectiveApp:
         browse_btn = ttk.Button(file_frame, text="Browse Video...", command=self.browse_file)
         browse_btn.pack(side=tk.RIGHT, padx=(8, 0))
 
-        # Step 1: Analyze
-        analyze_frame = ttk.Frame(main, style="Dark.TFrame")
-        analyze_frame.pack(fill=tk.X, pady=(0, 4))
+        # Settings row
+        settings_frame = ttk.LabelFrame(main, text="Settings", style="Dark.TLabelframe",
+                                         padding=12)
+        settings_frame.pack(fill=tk.X, pady=(0, 12))
 
-        self.analyze_btn = ttk.Button(analyze_frame, text="Analyze", command=self.start_analyze,
+        settings_inner = ttk.Frame(settings_frame, style="Dark.TFrame")
+        settings_inner.pack(fill=tk.X)
+
+        # Detection Threshold
+        thresh_label = ttk.Label(settings_inner, text="Detection Threshold:", style="Dark.TLabel")
+        thresh_label.pack(side=tk.LEFT)
+        self._add_tooltip(thresh_label, "How much motion a frame needs vs its neighbors to be flagged.\n"
+                                         "2.0 = frame must have 2x the normal motion.\n"
+                                         "Lower = more sensitive, higher = only big jumps.")
+        self.threshold_var = tk.DoubleVar(value=2.0)
+        thresh_spin = ttk.Spinbox(settings_inner, from_=1.2, to=5.0, increment=0.1,
+                                   textvariable=self.threshold_var, width=6)
+        thresh_spin.pack(side=tk.LEFT, padx=(4, 4))
+        thresh_hint = ttk.Label(settings_inner, text="?", style="Dark.TLabel",
+                                 font=("Segoe UI", 9, "bold"), cursor="question_arrow")
+        thresh_hint.pack(side=tk.LEFT, padx=(0, 16))
+        self._add_tooltip(thresh_hint, "How much motion a frame needs vs its neighbors to be flagged.\n"
+                                        "2.0 = frame must have 2x the normal motion.\n"
+                                        "Lower = more sensitive, higher = only big jumps.")
+
+        # Second settings row — fill mode + precision
+        settings_inner2 = ttk.Frame(settings_frame, style="Dark.TFrame")
+        settings_inner2.pack(fill=tk.X, pady=(8, 0))
+
+        ttk.Label(settings_inner2, text="Fill mode:", style="Dark.TLabel").pack(side=tk.LEFT)
+        self.fill_mode_var = tk.StringVar(value="RIFE (AI)")
+        self.fill_mode_combo = ttk.Combobox(settings_inner2, textvariable=self.fill_mode_var,
+                                             values=["Black", "White", "Blend (debug)", "RIFE (AI)", "RIFE + Labels", "Duplicate (Fix Externally)"],
+                                             state="readonly", width=22)
+        self.fill_mode_combo.pack(side=tk.LEFT, padx=(4, 0))
+
+        # Full precision toggle (for RIFE)
+        self.full_precision_var = tk.BooleanVar(value=True)
+        self.fp_cb = ttk.Checkbutton(settings_inner2, text="Full precision",
+                                      variable=self.full_precision_var)
+        self.fp_cb.pack(side=tk.LEFT, padx=(12, 0))
+
+        # Third settings row — fix mode
+        settings_inner_fix = ttk.Frame(settings_frame, style="Dark.TFrame")
+        settings_inner_fix.pack(fill=tk.X, pady=(8, 0))
+
+        ttk.Label(settings_inner_fix, text="Fix mode:", style="Dark.TLabel").pack(side=tk.LEFT)
+        self.fix_mode_var = tk.StringVar(value="Spikes + Dips")
+        self.fix_mode_combo = ttk.Combobox(settings_inner_fix, textvariable=self.fix_mode_var,
+                                            values=["Spikes Only", "Dips Only", "Spikes + Dips"],
+                                            state="readonly", width=14)
+        self.fix_mode_combo.pack(side=tk.LEFT, padx=(4, 0))
+        fix_mode_hint = ttk.Label(settings_inner_fix, text="?", style="Dark.TLabel",
+                                   font=("Segoe UI", 9, "bold"), cursor="question_arrow")
+        fix_mode_hint.pack(side=tk.LEFT, padx=(4, 0))
+        self._add_tooltip(fix_mode_hint, "Spikes = missing frames (insert interpolated frames)\n"
+                                          "Dips = duplicate/stuck frames (replace with interpolation)\n"
+                                          "Spikes + Dips = fix both in one pass")
+
+        # Fourth settings row — output format
+        settings_inner3 = ttk.Frame(settings_frame, style="Dark.TFrame")
+        settings_inner3.pack(fill=tk.X, pady=(8, 0))
+
+        ttk.Label(settings_inner3, text="Output:", style="Dark.TLabel").pack(side=tk.LEFT)
+        self.output_format_var = tk.StringVar(value="H.264 (.mp4)")
+        formats = ["H.264 (.mp4)", "ProRes HQ (.mov)"]
+        if not shutil.which("ffmpeg"):
+            formats = ["H.264 (.mp4)"]  # ProRes needs FFmpeg
+        self.output_format_combo = ttk.Combobox(settings_inner3, textvariable=self.output_format_var,
+                                                 values=formats, state="readonly", width=18)
+        self.output_format_combo.pack(side=tk.LEFT, padx=(4, 0))
+
+        self.ffmpeg_label = ttk.Label(settings_inner3,
+                                       text="✓ FFmpeg found" if shutil.which("ffmpeg") else "⚠ FFmpeg not found (ProRes unavailable)",
+                                       style="Info.TLabel")
+        self.ffmpeg_label.pack(side=tk.LEFT, padx=(12, 0))
+
+        # Buttons row 1: Analyze + Fix
+        btn_frame = ttk.Frame(main, style="Dark.TFrame")
+        btn_frame.pack(fill=tk.X, pady=(0, 4))
+
+        self.analyze_btn = ttk.Button(btn_frame, text="Analyze", command=self.start_analyze,
                                        style="Accent.TButton")
         self.analyze_btn.pack(side=tk.LEFT)
 
-        self.export_btn = ttk.Button(analyze_frame, text="Export Report",
+        self.fix_btn = ttk.Button(btn_frame, text="Fix Video (Insert Frames)",
+                                   command=self.fix_video, state=tk.DISABLED)
+        self.fix_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        self.export_btn = ttk.Button(btn_frame, text="Export Report",
                                       command=self.export_report, state=tk.DISABLED)
         self.export_btn.pack(side=tk.LEFT, padx=(8, 0))
 
-        # Step 2: Threshold adjustment (adjust after analysis)
-        thresh_frame = ttk.LabelFrame(main, text="Detection Thresholds", style="Dark.TLabelframe",
-                                       padding=12)
-        thresh_frame.pack(fill=tk.X, pady=(0, 8))
+        # Buttons row 2: Recursive Fix + Intensity + Stop (hidden for now)
+        btn_frame2 = ttk.Frame(main, style="Dark.TFrame")
+        # btn_frame2.pack(fill=tk.X, pady=(0, 8))  # Hidden — recursive mode shelved
 
-        # Spike Threshold row
-        spike_row = ttk.Frame(thresh_frame, style="Dark.TFrame")
-        spike_row.pack(fill=tk.X)
+        self.recursive_btn = ttk.Button(btn_frame2, text="Recursive Fix",
+                                        command=self.recursive_fix, state=tk.DISABLED)
+        self.recursive_btn.pack(side=tk.LEFT)
 
-        ttk.Label(spike_row, text="Spike Threshold:", style="Dark.TLabel").pack(side=tk.LEFT)
-        self.spike_threshold_var = tk.DoubleVar(value=2.0)
-        self.spike_thresh_slider = tk.Scale(
-            spike_row, from_=0.05, to=5.0, resolution=0.05, orient=tk.HORIZONTAL,
-            variable=self.spike_threshold_var, length=350,
-            bg="#1a1a1a", fg="#e0e0e0", highlightthickness=0, troughcolor="#333333",
-            command=lambda v: self._on_threshold_drag())
-        self.spike_thresh_slider.bind("<ButtonRelease-1>", lambda e: self._on_slider_release())
-        self.spike_thresh_slider.pack(side=tk.LEFT, padx=(4, 4))
-        self.spike_thresh_label = ttk.Label(spike_row, text="2.0", style="Dark.TLabel", width=4)
-        self.spike_thresh_label.pack(side=tk.LEFT, padx=(0, 8))
-        self.ignore_spikes_var = tk.BooleanVar(value=False)
-        self._spike_ignore_auto = False  # True when checkbox was set by slider extreme
-        self._ignore_spikes_cb = ttk.Checkbutton(spike_row, text="Ignore Spikes",
-                         variable=self.ignore_spikes_var,
-                         command=self._on_ignore_toggle)
-        self._ignore_spikes_cb.pack(side=tk.LEFT, padx=(8, 0))
-
-        # Spike direction label
-        spike_dir = ttk.Frame(thresh_frame, style="Dark.TFrame")
-        spike_dir.pack(fill=tk.X)
-        ttk.Label(spike_dir, text="", style="Info.TLabel", width=14).pack(side=tk.LEFT)  # spacer
-        ttk.Label(spike_dir, text="\u2190 more events", style="Info.TLabel").pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Label(spike_dir, text="less events \u2192", style="Info.TLabel").pack(side=tk.LEFT, padx=(120, 0))
-
-        # Dip Threshold row
-        dip_row = ttk.Frame(thresh_frame, style="Dark.TFrame")
-        dip_row.pack(fill=tk.X, pady=(8, 0))
-
-        ttk.Label(dip_row, text="Dip Threshold:", style="Dark.TLabel").pack(side=tk.LEFT)
-        self.dip_threshold_var = tk.DoubleVar(value=0.70)
-        self.dip_thresh_slider = tk.Scale(
-            dip_row, from_=0.05, to=0.99, resolution=0.01, orient=tk.HORIZONTAL,
-            variable=self.dip_threshold_var, length=350,
-            bg="#1a1a1a", fg="#e0e0e0", highlightthickness=0, troughcolor="#333333",
-            command=lambda v: self._on_threshold_drag())
-        self.dip_thresh_slider.bind("<ButtonRelease-1>", lambda e: self._on_slider_release())
-        self.dip_thresh_slider.pack(side=tk.LEFT, padx=(4, 4))
-        self.dip_thresh_label = ttk.Label(dip_row, text="0.70", style="Dark.TLabel", width=4)
-        self.dip_thresh_label.pack(side=tk.LEFT, padx=(0, 8))
-        self.ignore_dips_var = tk.BooleanVar(value=False)
-        self._dip_ignore_auto = False  # True when checkbox was set by slider extreme
-        self._ignore_dips_cb = ttk.Checkbutton(dip_row, text="Ignore Dips",
-                         variable=self.ignore_dips_var,
-                         command=self._on_ignore_toggle)
-        self._ignore_dips_cb.pack(side=tk.LEFT, padx=(8, 0))
-
-        # Dip direction label
-        dip_dir = ttk.Frame(thresh_frame, style="Dark.TFrame")
-        dip_dir.pack(fill=tk.X)
-        ttk.Label(dip_dir, text="", style="Info.TLabel", width=14).pack(side=tk.LEFT)  # spacer
-        ttk.Label(dip_dir, text="\u2190 less events", style="Info.TLabel").pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Label(dip_dir, text="more events \u2192", style="Info.TLabel").pack(side=tk.LEFT, padx=(120, 0))
-
-        # Always full precision (no user toggle)
-        self.full_precision_var = tk.BooleanVar(value=True)
+        self.intensity_var = tk.IntVar(value=5)
+        self.stop_btn = ttk.Button(btn_frame2, text="Stop", command=self.stop_recursive,
+                                    state=tk.DISABLED)
+        self.stop_btn.pack(side=tk.LEFT, padx=(12, 0))
 
         # Progress
         self.progress_var = tk.DoubleVar(value=0)
@@ -251,58 +242,8 @@ class FrameDetectiveApp:
         self.status_label = ttk.Label(main, text="Ready", style="Info.TLabel")
         self.status_label.pack(anchor="w", pady=(0, 8))
 
-        # Step 3: Output section
-        output_frame = ttk.LabelFrame(main, text="Output", style="Dark.TLabelframe",
-                                       padding=12)
-        output_frame.pack(fill=tk.X, pady=(0, 8))
-
-        # Output Route
-        route_row = ttk.Frame(output_frame, style="Dark.TFrame")
-        route_row.pack(fill=tk.X)
-
-        ttk.Label(route_row, text="Route:", style="Dark.TLabel").pack(side=tk.LEFT)
-        self.output_route_var = tk.StringVar(value="internal")
-        for val, label in [("external", "Prep for External"), ("internal", "Internal Solve"), ("debug", "Debug")]:
-            ttk.Radiobutton(route_row, text=label, variable=self.output_route_var,
-                             value=val).pack(side=tk.LEFT, padx=(8, 0))
-        route_hint = ttk.Label(route_row, text="?", style="Dark.TLabel",
-                                font=("Segoe UI", 9, "bold"), cursor="question_arrow")
-        route_hint.pack(side=tk.LEFT, padx=(4, 0))
-        self._add_tooltip(route_hint,
-            "Prep for External: Duplicates frames for external tools (e.g. Topaz) to fix\n"
-            "Internal Solve: Uses RIFE AI to interpolate/replace frames directly\n"
-            "Debug: Inserts black frames with labels showing original frame numbers")
-
-        # Output Format + FFmpeg status
-        format_row = ttk.Frame(output_frame, style="Dark.TFrame")
-        format_row.pack(fill=tk.X, pady=(8, 0))
-
-        ttk.Label(format_row, text="Format:", style="Dark.TLabel").pack(side=tk.LEFT)
-        self.output_format_var = tk.StringVar(value="H.264 (.mp4)")
-        has_ffmpeg = shutil.which("ffmpeg") is not None
-        ttk.Radiobutton(format_row, text="H.264 (.mp4)", variable=self.output_format_var,
-                          value="H.264 (.mp4)").pack(side=tk.LEFT, padx=(8, 0))
-        prores_rb = ttk.Radiobutton(format_row, text="ProRes HQ (.mov)", variable=self.output_format_var,
-                                      value="ProRes HQ (.mov)")
-        prores_rb.pack(side=tk.LEFT, padx=(8, 0))
-        if not has_ffmpeg:
-            prores_rb.configure(state=tk.DISABLED)
-        self.ffmpeg_label = ttk.Label(format_row,
-                                       text="FFmpeg found" if has_ffmpeg else "FFmpeg not found (ProRes unavailable)",
-                                       style="Info.TLabel")
-        self.ffmpeg_label.pack(side=tk.LEFT, padx=(12, 0))
-
-        # Output button
-        output_btn_row = ttk.Frame(output_frame, style="Dark.TFrame")
-        output_btn_row.pack(fill=tk.X, pady=(8, 0))
-
-        self.fix_btn = ttk.Button(output_btn_row, text="Output",
-                                   command=self.fix_video, state=tk.DISABLED,
-                                   style="Accent.TButton")
-        self.fix_btn.pack(side=tk.LEFT)
-
-        # Visualization area — chart + spike table + log on left, frame preview on right
-        results_frame = ttk.LabelFrame(main, text="Visualization", style="Dark.TLabelframe",
+        # Results area — chart + spike table + log on left, frame preview on right
+        results_frame = ttk.LabelFrame(main, text="Results", style="Dark.TLabelframe",
                                         padding=8)
         results_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -394,7 +335,6 @@ class FrameDetectiveApp:
         # Bind chart interaction for frame cursor
         self.canvas.bind("<Motion>", self._on_chart_hover)
         self.canvas.bind("<Button-1>", self._on_chart_click)
-        self.canvas.bind("<Button-3>", self._on_chart_right_click)
         self.canvas.bind("<MouseWheel>", self._on_chart_scroll)
         self._cursor_line = None
         self._cursor_locked = False  # True when user clicks to lock cursor
@@ -413,28 +353,26 @@ class FrameDetectiveApp:
         # Header row
         header = ttk.Frame(spike_table_frame, style="Dark.TFrame")
         header.pack(fill=tk.X)
-        for col, w in [("Type", 5), ("Frame", 6), ("Motion", 8), ("Local Avg", 8), ("Ratio", 6), ("Dupes", 6)]:
+        for col, w in [("Type", 5), ("Frame", 6), ("Motion", 8), ("Local Avg", 8), ("Ratio", 6), ("Fix", 6)]:
             ttk.Label(header, text=col, style="Dark.TLabel", width=w,
                        font=("Consolas", 9, "bold")).pack(side=tk.LEFT, padx=2)
 
         # Scrollable spike rows
-        self._spike_canvas = tk.Canvas(spike_table_frame, bg="#1a1a1a", highlightthickness=0, height=150)
-        spike_scrollbar = ttk.Scrollbar(spike_table_frame, orient=tk.VERTICAL, command=self._spike_canvas.yview)
-        self.spike_list_frame = ttk.Frame(self._spike_canvas, style="Dark.TFrame")
+        spike_canvas = tk.Canvas(spike_table_frame, bg="#1a1a1a", highlightthickness=0, height=150)
+        spike_scrollbar = ttk.Scrollbar(spike_table_frame, orient=tk.VERTICAL, command=spike_canvas.yview)
+        self.spike_list_frame = ttk.Frame(spike_canvas, style="Dark.TFrame")
         self.spike_list_frame.bind("<Configure>",
-            lambda e: self._spike_canvas.configure(scrollregion=self._spike_canvas.bbox("all")))
-        self._spike_canvas.create_window((0, 0), window=self.spike_list_frame, anchor="nw")
-        self._spike_canvas.configure(yscrollcommand=spike_scrollbar.set)
-        self._spike_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            lambda e: spike_canvas.configure(scrollregion=spike_canvas.bbox("all")))
+        spike_canvas.create_window((0, 0), window=self.spike_list_frame, anchor="nw")
+        spike_canvas.configure(yscrollcommand=spike_scrollbar.set)
+        spike_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         spike_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Mouse wheel scrolling — bound globally to the canvas
+        # Mouse wheel scrolling
         def _on_mousewheel(event):
-            self._spike_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-            return "break"  # prevent spinboxes from capturing the scroll
-        self._spike_canvas.bind("<MouseWheel>", _on_mousewheel)
+            spike_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        spike_canvas.bind("<MouseWheel>", _on_mousewheel)
         self.spike_list_frame.bind("<MouseWheel>", _on_mousewheel)
-        self._spike_mousewheel_handler = _on_mousewheel
 
         # Row 1: Set All to Auto + Set All to N
         bulk_row = ttk.Frame(spike_table_frame, style="Dark.TFrame")
@@ -497,23 +435,6 @@ class FrameDetectiveApp:
         self.root.bind("<I>", lambda e: self._set_in_point() if not isinstance(e.widget, (tk.Entry, ttk.Entry, ttk.Spinbox)) else None)
         self.root.bind("<O>", lambda e: self._set_out_point() if not isinstance(e.widget, (tk.Entry, ttk.Entry, ttk.Spinbox)) else None)
         self.root.bind("<space>", lambda e: self._toggle_play() if not isinstance(e.widget, (tk.Entry, ttk.Entry, ttk.Spinbox)) else None)
-        self.root.bind("<Control-s>", lambda e: self.save_project())
-        self.root.bind("<Control-S>", lambda e: self.save_project_as())
-        self.root.bind("<Control-o>", lambda e: self.open_project())
-
-        # Project file tracking
-        self._project_path = None
-
-        # Menu bar
-        menubar = tk.Menu(self.root, bg="#333333", fg="#e0e0e0",
-                           activebackground="#555555", activeforeground="#ffffff")
-        file_menu = tk.Menu(menubar, tearoff=0, bg="#333333", fg="#e0e0e0",
-                             activebackground="#555555", activeforeground="#ffffff")
-        file_menu.add_command(label="Open Project...  Ctrl+O", command=self.open_project)
-        file_menu.add_command(label="Save Project     Ctrl+S", command=self.save_project)
-        file_menu.add_command(label="Save As...       Ctrl+Shift+S", command=self.save_project_as)
-        menubar.add_cascade(label="File", menu=file_menu)
-        self.root.config(menu=menubar)
 
         # Enable drag & drop via simple protocol
         self.setup_drop_zone()
@@ -558,7 +479,6 @@ class FrameDetectiveApp:
         if path.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm')):
             self.video_path = Path(path)
             self.file_label.configure(text=str(self.video_path))
-            self._auto_analyze_if_short()
         else:
             messagebox.showwarning("Invalid file", "Please drop a video file.")
 
@@ -571,23 +491,6 @@ class FrameDetectiveApp:
             self.video_path = Path(path)
             self.file_label.configure(text=str(self.video_path))
             self.log_msg(f"Loaded: {self.video_path.name}\n")
-            self._auto_analyze_if_short()
-
-    def _auto_analyze_if_short(self):
-        """Auto-analyze videos under 2 minutes, otherwise just load."""
-        if not self.video_path or self.analyzing:
-            return
-        cap = cv2.VideoCapture(str(self.video_path))
-        if not cap.isOpened():
-            return
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-        cap.release()
-        if fps > 0:
-            duration_sec = total / fps
-            if duration_sec <= 120:
-                self.log_msg(f"Video is {duration_sec:.0f}s — auto-analyzing...\n")
-                self.start_analyze()
 
     def log_msg(self, msg, tag=None):
         self.log.insert(tk.END, msg, tag)
@@ -694,12 +597,9 @@ class FrameDetectiveApp:
             cap.release()
 
             # Detect spikes and dips
-            spike_thresh = self.spike_threshold_var.get()
-            dip_thresh = self.dip_threshold_var.get()
-            # Always run detection — ignore flags are applied at display time
-            self.spikes = self.detect_spikes(self.magnitudes, spike_thresh)
-            self.dips = self.detect_dips(self.magnitudes, dip_thresh)
-            self.user_overrides = {}  # Clear user overrides on fresh analysis
+            threshold = self.threshold_var.get()
+            self.spikes = self.detect_spikes(self.magnitudes, threshold)
+            self.dips = self.detect_dips(self.magnitudes, threshold)
 
             # Recalculate spike est_missing with dips excluded from median
             # (same spikes detected, just cleaner frame count estimates)
@@ -786,10 +686,8 @@ class FrameDetectiveApp:
                 spike['ratio'] = float(ratio)
                 spike['est_missing'] = max(1, round(ratio) - 1)
 
-    def detect_dips(self, magnitudes, dip_threshold=0.70):
-        """Detect frames with abnormally LOW motion (duplicate/stuck frames).
-        dip_threshold is a direct ratio: flag if frame motion / local median < dip_threshold.
-        """
+    def detect_dips(self, magnitudes, threshold_multiplier=2.0):
+        """Detect frames with abnormally LOW motion (duplicate/stuck frames)."""
         if len(magnitudes) < 5:
             return []
 
@@ -801,6 +699,11 @@ class FrameDetectiveApp:
             window = 3
 
         dips = []
+        # Dips need more sensitivity than a simple inverse.
+        # At spike threshold 2.0 → dip threshold 0.70 (catches frames at ≤70% of median)
+        # At spike threshold 1.5 → dip threshold 0.80
+        # Lower spike threshold = catches more of both.
+        dip_threshold = min(0.80, 1.0 / threshold_multiplier + 0.20)
 
         # Skip first 2 and last 2 frames — edge frames have unreliable motion
         for i in range(2, len(mags) - 2):
@@ -835,188 +738,51 @@ class FrameDetectiveApp:
                     })
         return dips
 
-    def _get_ground_truth(self):
-        """Build the ground truth frame classification from auto-detection + user overrides.
-
-        Returns dict: frame_num -> {"type": "spike"|"dip", "count": int, "source": "auto"|"user",
-                                     "magnitude": float, "local_median": float, "ratio": float}
-
-        Priority: user_overrides > auto-detection. Ignore flags filter at display time, not here.
-        """
-        result = {}
-
-        # 1. Start with auto-detected spikes
-        for s in self.spikes:
-            fn = s['frame']
-            result[fn] = {
-                "type": "spike",
-                "count": s.get('est_missing', 1),
-                "source": "auto",
-                "magnitude": s.get('magnitude', 0),
-                "local_median": s.get('local_median', 0),
-                "ratio": s.get('ratio', 0),
-            }
-
-        # 2. Add auto-detected dips
-        for d in self.dips:
-            fn = d['frame']
-            result[fn] = {
-                "type": "dip",
-                "count": 1,
-                "source": "auto",
-                "magnitude": d.get('magnitude', 0),
-                "local_median": d.get('local_median', 0),
-                "ratio": d.get('ratio', 0),
-            }
-
-        # 3. Apply user overrides (highest priority)
-        for fn, ov in self.user_overrides.items():
-            if fn in result:
-                # Override type and count, keep motion data
-                result[fn]["type"] = ov["type"]
-                result[fn]["count"] = ov["count"]
-                result[fn]["source"] = "user"
-            else:
-                # User-added frame not in auto-detection — look up motion data
-                motion = 0.0
-                local_avg = 0.0
-                ratio = 0.0
-                for mi, (frame_num, mag) in enumerate(self.magnitudes):
-                    if frame_num == fn:
-                        motion = mag
-                        window = 7
-                        start = max(0, mi - window)
-                        end = min(len(self.magnitudes), mi + window + 1)
-                        neighbors = [self.magnitudes[j][1] for j in range(start, end) if j != mi]
-                        if neighbors:
-                            local_avg = float(np.median(neighbors))
-                            ratio = motion / local_avg if local_avg > 0 else 0
-                        break
-                result[fn] = {
-                    "type": ov["type"],
-                    "count": ov["count"],
-                    "source": "user",
-                    "magnitude": motion,
-                    "local_median": local_avg,
-                    "ratio": ratio,
-                }
-
-        return result
-
-    def _on_threshold_drag(self, *args):
-        """Called continuously while dragging a threshold slider — fast path, chart only."""
-        if not self.magnitudes:
-            return
-
-        spike_thresh = self.spike_threshold_var.get()
-        dip_thresh = self.dip_threshold_var.get()
-
-        # Update threshold value labels
-        self.spike_thresh_label.configure(text=f"{spike_thresh:.1f}")
-        self.dip_thresh_label.configure(text=f"{dip_thresh:.2f}")
-
-        # Auto-ignore at extremes; only auto-uncheck what was auto-checked
-        if spike_thresh >= 5.0:
-            self.ignore_spikes_var.set(True)
-            self._spike_ignore_auto = True
-        elif self._spike_ignore_auto and spike_thresh < 5.0:
-            self.ignore_spikes_var.set(False)
-            self._spike_ignore_auto = False
-
-        if dip_thresh <= 0.05:
-            self.ignore_dips_var.set(True)
-            self._dip_ignore_auto = True
-        elif self._dip_ignore_auto and dip_thresh > 0.05:
-            self.ignore_dips_var.set(False)
-            self._dip_ignore_auto = False
-
-        # Always run detection — ignore flags are applied at display time by draw_chart/show_results
-        self.spikes = self.detect_spikes(self.magnitudes, spike_thresh)
-        self.dips = self.detect_dips(self.magnitudes, dip_thresh)
-
-        # Chart only — skip expensive table rebuild while dragging
-        self.draw_chart()
-
-    def _on_slider_release(self, *args):
-        """Called when a threshold slider is released — does the full table rebuild."""
-        if not self.magnitudes:
-            return
-
-        dip_frame_set = set(d['frame'] for d in self.dips)
-        if dip_frame_set:
-            self._recalc_spike_estimates(dip_frame_set)
-
-        self.show_results()
-
-    def _on_ignore_toggle(self, *args):
-        """Called when an Ignore checkbox is toggled manually — respects user's choice.
-
-        Does NOT re-run detection. The ignore state is applied at display time
-        (draw_chart and show_results read ignore flags). This means unchecking
-        instantly restores everything without re-analysis.
-        """
-        if not self.magnitudes:
-            return
-
-        # User manually toggled — clear auto flags so slider won't override this
-        self._spike_ignore_auto = False
-        self._dip_ignore_auto = False
-
-        # If detection hasn't run yet (spikes/dips empty because they were cleared),
-        # re-detect now so there's data to show/hide
-        spike_thresh = self.spike_threshold_var.get()
-        dip_thresh = self.dip_threshold_var.get()
-        if not self.spikes and not self.ignore_spikes_var.get():
-            self.spikes = self.detect_spikes(self.magnitudes, spike_thresh)
-        if not self.dips and not self.ignore_dips_var.get():
-            self.dips = self.detect_dips(self.magnitudes, dip_thresh)
-
-        self.show_results()
-
-    def _on_threshold_change(self, *args):
-        """Legacy alias — kept for any external callers."""
-        self._on_threshold_drag()
-        self._on_slider_release()
-
     def show_results(self):
         self.progress_var.set(100)
+        self.draw_chart()
 
         # Clear old spike table rows
         for w in self.spike_list_frame.winfo_children():
             w.destroy()
         self.spike_entries = {}
         self.spike_auto_counts = {}
-        self.dip_entries = set()  # derived from ground truth, for table display
-
-        # Build merged list from auto-detection + user overrides
-        gt = self._get_ground_truth()
+        self.dip_entries = set()  # track which frame_nums are dips
 
         self.log_msg(f"\nAnalysis complete: {len(self.magnitudes)} frames\n", "header")
 
-        if gt:
-            n_spikes = sum(1 for v in gt.values() if v["type"] == "spike")
-            n_dips = sum(1 for v in gt.values() if v["type"] == "dip")
-            if n_spikes:
-                self.log_msg(f"Found {n_spikes} spikes (missing frames) — shown in red.\n", "spike")
-            if n_dips:
-                self.log_msg(f"Found {n_dips} dips (duplicate frames) — shown in yellow.\n", "dip")
+        has_issues = False
 
-            # Sort by frame number and build table rows
-            for fn in sorted(gt.keys()):
-                info = gt[fn]
-                self._add_spike_row(fn, info["magnitude"], info["local_median"],
-                                     info["ratio"], info["count"], kind=info["type"])
+        if self.spikes:
+            self.log_msg(f"Found {len(self.spikes)} spikes (missing frames) — shown in red.\n", "spike")
+            has_issues = True
+        if self.dips:
+            self.log_msg(f"Found {len(self.dips)} dips (duplicate frames) — shown in yellow.\n", "dip")
+            has_issues = True
+
+        if has_issues:
+            # Merge spikes and dips into one sorted list by frame number
+            all_issues = []
+            for s in self.spikes:
+                all_issues.append(('spike', s['frame'], s['magnitude'], s['local_median'],
+                                    s['ratio'], s['est_missing']))
+            for d in self.dips:
+                all_issues.append(('dip', d['frame'], d['magnitude'], d['local_median'],
+                                    d['ratio'], 1))
+            all_issues.sort(key=lambda x: x[1])  # sort by frame number
+
+            for kind, frame, mag, local_avg, ratio, count in all_issues:
+                self._add_spike_row(frame, mag, local_avg, ratio, count, kind=kind)
 
             self.log_msg("Edit table below, then Fix. Set 0 to skip.\n")
             self.fix_btn.configure(state=tk.NORMAL)
+            self.recursive_btn.configure(state=tk.NORMAL)
             self.export_btn.configure(state=tk.NORMAL)
-            self.set_status(f"Found {n_spikes} spikes, {n_dips} dips. Edit, then Fix.")
+            self.set_status(f"Found {len(self.spikes)} spikes, {len(self.dips)} dips. Edit, then Fix.")
         else:
             self.log_msg("No issues detected — video looks clean!\n", "good")
             self.export_btn.configure(state=tk.NORMAL)
             self.set_status("No issues found.")
-
-        self.draw_chart()
 
     def _add_spike_row(self, frame_num, motion, local_avg, ratio, insert_count, kind="spike"):
         """Add an editable row to the spike table. kind = 'spike' or 'dip'."""
@@ -1035,25 +801,21 @@ class FrameDetectiveApp:
                              font=("Consolas", 9, "bold"), width=7, anchor="w")
         type_lbl.pack(side=tk.LEFT, padx=2)
 
-        tk.Label(row, text=f"{frame_num}", bg="#1a1a1a", fg="#e0e0e0", width=6,
-                 font=("Consolas", 9)).pack(side=tk.LEFT, padx=2)
-        tk.Label(row, text=f"{motion:.2f}", bg="#1a1a1a", fg="#e0e0e0", width=8,
-                 font=("Consolas", 9)).pack(side=tk.LEFT, padx=2)
-        tk.Label(row, text=f"{local_avg:.2f}", bg="#1a1a1a", fg="#e0e0e0", width=8,
-                 font=("Consolas", 9)).pack(side=tk.LEFT, padx=2)
-        tk.Label(row, text=f"{ratio:.2f}x", bg="#1a1a1a", fg="#e0e0e0", width=6,
-                 font=("Consolas", 9)).pack(side=tk.LEFT, padx=2)
+        ttk.Label(row, text=f"{frame_num}", style="Dark.TLabel", width=6,
+                   font=("Consolas", 9)).pack(side=tk.LEFT, padx=2)
+        ttk.Label(row, text=f"{motion:.2f}", style="Dark.TLabel", width=8,
+                   font=("Consolas", 9)).pack(side=tk.LEFT, padx=2)
+        ttk.Label(row, text=f"{local_avg:.2f}", style="Dark.TLabel", width=8,
+                   font=("Consolas", 9)).pack(side=tk.LEFT, padx=2)
+        ttk.Label(row, text=f"{ratio:.2f}x", style="Dark.TLabel", width=6,
+                   font=("Consolas", 9)).pack(side=tk.LEFT, padx=2)
 
-        # For spikes: spinbox controls how many duplicate frames to insert (1-10)
-        # For dips: show a read-only label (enabled/disabled via ✕ and right-click only)
+        # For spikes: spinbox controls how many frames to insert (0-10)
+        # For dips: spinbox is 0 (skip) or 1 (replace) only
         var = tk.IntVar(value=insert_count)
-        if kind == "dip":
-            dip_lbl = tk.Label(row, textvariable=var, bg="#1a1a1a", fg="#e0e0e0",
-                               font=("Consolas", 9), width=4, anchor="center")
-            dip_lbl.pack(side=tk.LEFT, padx=2)
-        else:
-            spin = ttk.Spinbox(row, from_=1, to=10, increment=1, textvariable=var, width=4)
-            spin.pack(side=tk.LEFT, padx=2)
+        max_val = 1 if kind == "dip" else 10
+        spin = ttk.Spinbox(row, from_=0, to=max_val, increment=1, textvariable=var, width=4)
+        spin.pack(side=tk.LEFT, padx=2)
 
         # ✕ button sets to 0 (disables) instead of removing the row
         def disable_row(f=frame_num, v=var):
@@ -1070,47 +832,21 @@ class FrameDetectiveApp:
                         self._update_cursor(mi)
                         break
         row.bind("<Enter>", _on_row_enter)
-        # Bind mousewheel on all children to scroll table (not change spinbox values)
-        row.bind("<MouseWheel>", self._spike_mousewheel_handler)
         for child in row.winfo_children():
             child.bind("<Enter>", _on_row_enter)
-            child.bind("<MouseWheel>", self._spike_mousewheel_handler)
 
-        # Clamp values, update row styling, and redraw chart when value changes
-        def _update_row_style(disabled):
-            """Gray out or restore all tk.Label children in this row."""
-            fg = "#666666" if disabled else "#e0e0e0"
-            type_fg_active = "#ff6b6b" if kind == "spike" else "#ffcc44"
-            for child in row.winfo_children():
-                if isinstance(child, tk.Label):
-                    # Type label gets its specific color; others get default
-                    if child == type_lbl:
-                        child.configure(fg="#666666" if disabled else type_fg_active)
-                    else:
-                        child.configure(fg=fg)
-
+        # Clamp dip values to 0-1 and redraw chart when value changes
         def _on_var_change(*_):
-            try:
-                v = var.get()
-            except (tk.TclError, ValueError):
-                return
             if kind == "dip":
-                if v > 1:
-                    var.set(1)
-                    return
-            else:
-                # Spikes: clamp to 1-10 (only ✕ button can set to 0)
-                if v > 10:
-                    var.set(10)
-                    return
-                elif v < 0:
-                    var.set(1)
-                    return
-            _update_row_style(v == 0)
+                try:
+                    v = var.get()
+                    if v > 1:
+                        var.set(1)
+                        return  # set triggers another call
+                except (tk.TclError, ValueError):
+                    pass
             self.draw_chart()
         var.trace_add("write", _on_var_change)
-        # Apply initial style (handles rows starting disabled, e.g. from loaded project)
-        _update_row_style(insert_count == 0)
 
         self.spike_entries[frame_num] = var
         self.spike_auto_counts[frame_num] = insert_count
@@ -1145,24 +881,36 @@ class FrameDetectiveApp:
 
         self.add_frame_entry.delete(0, tk.END)
         self.fix_btn.configure(state=tk.NORMAL)
+        self.recursive_btn.configure(state=tk.NORMAL)
         tag = "dip" if kind == "dip" else "spike"
         self.log_msg(f"  Added frame {frame_num} as {kind} manually\n", tag)
 
     def _rebuild_spike_table(self, counts):
-        """Clear and rebuild spike table rows using ground truth for types."""
+        """Clear and rebuild spike table rows in sorted frame order."""
+        old_dips = set(self.dip_entries)  # preserve dip knowledge
         for w in self.spike_list_frame.winfo_children():
             w.destroy()
         self.spike_entries = {}
         self.dip_entries = set()
 
-        gt = self._get_ground_truth()
+        mag_dict = {m[0]: m[1] for m in self.magnitudes}
+        spike_dict = {s['frame']: s for s in self.spikes}
+        dip_dict = {d['frame']: d for d in getattr(self, 'dips', [])}
 
         for frame_num in sorted(counts.keys()):
-            info = gt.get(frame_num, {"type": "spike", "magnitude": 0, "local_median": 0, "ratio": 0})
-            kind = info["type"]
-            # Use the count from the counts dict (preserves user edits), not from ground truth
-            self._add_spike_row(frame_num, info["magnitude"], info["local_median"],
-                                 info["ratio"], counts[frame_num], kind=kind)
+            # Determine if this is a dip or spike
+            if frame_num in dip_dict or frame_num in old_dips:
+                d = dip_dict.get(frame_num, {})
+                motion = d.get('magnitude', mag_dict.get(frame_num, 0.0))
+                local_avg = d.get('local_median', 0.0)
+                ratio = d.get('ratio', 0.0)
+                self._add_spike_row(frame_num, motion, local_avg, ratio, counts[frame_num], kind="dip")
+            else:
+                s = spike_dict.get(frame_num, {})
+                motion = s.get('magnitude', mag_dict.get(frame_num, 0.0))
+                local_avg = s.get('local_median', 0.0)
+                ratio = s.get('ratio', 0.0)
+                self._add_spike_row(frame_num, motion, local_avg, ratio, counts[frame_num], kind="spike")
 
     def set_all_auto(self):
         """Reset all spike rows to their auto-detected counts."""
@@ -1186,13 +934,9 @@ class FrameDetectiveApp:
         self._in_line = None
         self._out_line = None
         c = self.canvas
+        c.update_idletasks()
         cw = c.winfo_width()
         ch = c.winfo_height()
-        # Cache dimensions; on first draw they may be 1 so force an update once
-        if cw <= 1 or ch <= 1:
-            c.update_idletasks()
-            cw = c.winfo_width()
-            ch = c.winfo_height()
 
         if not self.magnitudes or cw < 10 or ch < 10:
             return
@@ -1226,20 +970,15 @@ class FrameDetectiveApp:
         all_mags = [m[1] for m in self.magnitudes]
         vis_mags = [all_mags[i] for i in visible]
         max_mag = max(vis_mags) if vis_mags else 1
-        # Build spike/dip/disabled sets from ground truth
-        gt = self._get_ground_truth()
-        ignore_spikes = self.ignore_spikes_var.get()
-        ignore_dips = self.ignore_dips_var.get()
-        spike_frames = set()
-        dip_frames = set()
-        disabled_frames = set()
-        for fn, info in gt.items():
-            if info["count"] == 0:
-                disabled_frames.add(fn)
-            elif info["type"] == "spike" and not ignore_spikes:
-                spike_frames.add(fn)
-            elif info["type"] == "dip" and not ignore_dips:
+        # Include both auto-detected and manually added entries
+        spike_frames = set(s['frame'] for s in self.spikes)
+        dip_frames = set(d['frame'] for d in getattr(self, 'dips', []))
+        # Add manually added entries from the table
+        for fn in self.spike_entries:
+            if fn in getattr(self, 'dip_entries', set()):
                 dip_frames.add(fn)
+            elif fn not in dip_frames:
+                spike_frames.add(fn)
 
         # Axes
         c.create_line(pad_left, pad_top, pad_left, ch - pad_bottom, fill="#555")
@@ -1270,25 +1009,37 @@ class FrameDetectiveApp:
                 y = ch - pad_bottom - h
                 frame_num = self.magnitudes[gi][0]
 
-                if frame_num in disabled_frames:
-                    bar_color = "#555555"
-                    label_color = "#777777"
+                # Check if this frame is disabled (set to 0 in table)
+                is_disabled = False
+                if frame_num in self.spike_entries:
+                    try:
+                        is_disabled = self.spike_entries[frame_num].get() == 0
+                    except (tk.TclError, ValueError):
+                        pass
+
+                if frame_num in spike_frames:
+                    if is_disabled:
+                        bar_color = "#555555"
+                        label_color = "#777777"
+                    else:
+                        bar_color = "#ff4444"
+                        label_color = "#ff6b6b"
                     c.create_rectangle(x, y, x + max(bar_w, 2), ch - pad_bottom,
                                         fill=bar_color, outline="")
                     if n_vis < 200:
                         c.create_text(x, y - 8, text=f"F{frame_num}", fill=label_color,
                                        font=("Consolas", 7), anchor="s")
-                elif frame_num in spike_frames:
-                    c.create_rectangle(x, y, x + max(bar_w, 2), ch - pad_bottom,
-                                        fill="#ff4444", outline="")
-                    if n_vis < 200:
-                        c.create_text(x, y - 8, text=f"F{frame_num}", fill="#ff6b6b",
-                                       font=("Consolas", 7), anchor="s")
                 elif frame_num in dip_frames:
+                    if is_disabled:
+                        bar_color = "#555555"
+                        label_color = "#777777"
+                    else:
+                        bar_color = "#ccaa00"
+                        label_color = "#ffcc44"
                     c.create_rectangle(x, y, x + max(bar_w, 2), ch - pad_bottom,
-                                        fill="#ccaa00", outline="")
+                                        fill=bar_color, outline="")
                     if n_vis < 200:
-                        c.create_text(x, y - 8, text=f"F{frame_num}", fill="#ffcc44",
+                        c.create_text(x, y - 8, text=f"F{frame_num}", fill=label_color,
                                        font=("Consolas", 7), anchor="s")
                 else:
                     c.create_rectangle(x, y, x + max(bar_w, 2), ch - pad_bottom,
@@ -1348,115 +1099,6 @@ class FrameDetectiveApp:
         else:
             self._cursor_locked = True
             self._update_cursor_from_x(event.x)
-
-    def _on_chart_right_click(self, event):
-        """Right-click on chart bar to toggle/reclassify a frame."""
-        idx = self._chart_x_to_frame_index(event.x)
-        if idx is None or not self.magnitudes:
-            return
-
-        frame_num = self.magnitudes[idx][0]
-
-        menu = tk.Menu(self.canvas, tearoff=0, bg="#333333", fg="#e0e0e0",
-                       activebackground="#555555", activeforeground="#ffffff",
-                       font=("Segoe UI", 9))
-
-        is_in_table = frame_num in self.spike_entries
-        is_dip = frame_num in self.dip_entries
-
-        if is_in_table:
-            current_val = self.spike_entries[frame_num].get()
-
-            # Always show set as spike / set as dip (mark current with checkmark)
-            spike_label = "Spike" + (" \u2713" if not is_dip else "")
-            dip_label = "Dip" + (" \u2713" if is_dip else "")
-            menu.add_command(label=f"Set as {spike_label}",
-                             command=lambda: self._ctx_set_type(frame_num, "spike"))
-            menu.add_command(label=f"Set as {dip_label}",
-                             command=lambda: self._ctx_set_type(frame_num, "dip"))
-            menu.add_separator()
-
-            if current_val > 0:
-                menu.add_command(label=f"Disable F{frame_num}",
-                                 command=lambda: self._ctx_disable_frame(frame_num))
-            else:
-                menu.add_command(label=f"Re-enable F{frame_num}",
-                                 command=lambda: self._ctx_enable_frame(frame_num))
-        else:
-            menu.add_command(label=f"Add F{frame_num} as Spike",
-                             command=lambda: self._ctx_add_frame(frame_num, "spike"))
-            menu.add_command(label=f"Add F{frame_num} as Dip",
-                             command=lambda: self._ctx_add_frame(frame_num, "dip"))
-
-        menu.tk_popup(event.x_root, event.y_root)
-
-    def _ctx_disable_frame(self, frame_num):
-        """Context menu: set frame fix count to 0 via user override."""
-        # Determine current type
-        gt = self._get_ground_truth()
-        frame_type = gt.get(frame_num, {}).get("type", "spike")
-        self.user_overrides[frame_num] = {"type": frame_type, "count": 0}
-        if frame_num in self.spike_entries:
-            self.spike_entries[frame_num].set(0)
-        self.draw_chart()
-
-    def _ctx_enable_frame(self, frame_num):
-        """Context menu: re-enable frame — remove user override to revert to auto."""
-        self.user_overrides.pop(frame_num, None)
-        if frame_num in self.spike_entries:
-            auto = self.spike_auto_counts.get(frame_num, 1)
-            self.spike_entries[frame_num].set(auto)
-        self.draw_chart()
-
-    def _ctx_set_type(self, frame_num, new_type):
-        """Context menu: reclassify a frame between spike and dip via user override."""
-        if new_type == "dip":
-            count = 1
-            self.user_overrides[frame_num] = {"type": "dip", "count": count}
-            self.dip_entries.add(frame_num)
-        else:
-            auto = self.spike_auto_counts.get(frame_num, 1)
-            self.user_overrides[frame_num] = {"type": "spike", "count": auto}
-            self.dip_entries.discard(frame_num)
-
-        # Rebuild table to reflect the type change
-        current = {f: v.get() for f, v in self.spike_entries.items()}
-        self._rebuild_spike_table(current)
-        self.draw_chart()
-
-    def _ctx_remove_frame(self, frame_num):
-        """Context menu: remove a frame from the table entirely."""
-        self.user_overrides.pop(frame_num, None)
-        current = {f: v.get() for f, v in self.spike_entries.items() if f != frame_num}
-        self.dip_entries.discard(frame_num)
-        self.spike_auto_counts.pop(frame_num, None)
-        self._rebuild_spike_table(current)
-        self.draw_chart()
-
-    def _ctx_add_frame(self, frame_num, kind):
-        """Context menu: add a frame to the table as spike or dip via user override."""
-        if frame_num in self.spike_entries:
-            return  # already in table
-
-        total = len(self.frames_data)
-        if frame_num < 0 or frame_num >= total:
-            return
-
-        count = 1
-        self.user_overrides[frame_num] = {"type": kind, "count": count}
-        if kind == "dip":
-            self.dip_entries.add(frame_num)
-
-        # Get motion data from ground truth (which already computed it)
-        gt = self._get_ground_truth()
-        info = gt.get(frame_num, {"magnitude": 0, "local_median": 0, "ratio": 0})
-
-        self._add_spike_row(frame_num, info["magnitude"], info["local_median"],
-                             info["ratio"], count, kind=kind)
-        self.draw_chart()
-        self.fix_btn.configure(state=tk.NORMAL)
-        tag = "dip" if kind == "dip" else "spike"
-        self.log_msg(f"  Added F{frame_num} as {kind} (right-click)\n", tag)
 
     def _on_chart_scroll(self, event):
         """Scroll wheel on chart to zoom in/out centered on cursor."""
@@ -2151,6 +1793,7 @@ class FrameDetectiveApp:
                      cv2.LINE_AA)
 
     def fix_video(self):
+        fix_mode = self.fix_mode_var.get()
         dip_entries = getattr(self, 'dip_entries', set())
 
         # Build insert plan (spikes) and replace plan (dips) from the editable table
@@ -2162,17 +1805,29 @@ class FrameDetectiveApp:
                 continue
             is_dip = frame_num in dip_entries
 
-            if is_dip and not self.ignore_dips_var.get():
+            if is_dip and fix_mode in ("Dips Only", "Spikes + Dips"):
                 replace_plan[frame_num] = True
-            elif not is_dip and not self.ignore_spikes_var.get():
+            elif not is_dip and fix_mode in ("Spikes Only", "Spikes + Dips"):
                 insert_plan[frame_num] = count
 
         if not insert_plan and not replace_plan:
-            messagebox.showinfo("Nothing to do", "No fixes to apply.")
+            messagebox.showinfo("Nothing to do", "No fixes to apply in the selected mode.")
             return
 
         out_fmt = self.output_format_var.get()
-        route = self.output_route_var.get()
+
+        # If H.264 selected and FFmpeg is available, suggest ProRes
+        if "H.264" in out_fmt and shutil.which("ffmpeg"):
+            switch = messagebox.askyesno(
+                "Output Format",
+                "H.264 is lossy even at high bitrate.\n"
+                "ProRes HQ is lossless and better for editing.\n\n"
+                "Switch to ProRes HQ?",
+                icon="question"
+            )
+            if switch:
+                out_fmt = "ProRes HQ (.mov)"
+                self.output_format_var.set(out_fmt)
 
         if "ProRes" in out_fmt:
             ext = ".mov"
@@ -2181,23 +1836,22 @@ class FrameDetectiveApp:
             ext = ".mp4"
             filetypes = [("MP4 files", "*.mp4")]
 
-        suffix_map = {"external": "_Prep", "internal": "_Internal", "debug": "_Debug"}
-        suffix = suffix_map.get(route, "_fixed")
         output_path = filedialog.asksaveasfilename(
-            title="Save video",
+            title="Save fixed video",
             defaultextension=ext,
             filetypes=filetypes,
-            initialfile=self.video_path.stem + suffix + ext
+            initialfile=self.video_path.stem + "_fixed" + ext
         )
         if not output_path:
             return
 
-        route_names = {"external": "Prep for External", "internal": "Internal Solve", "debug": "Debug"}
-        self.set_status(f"Building video ({route_names.get(route, route)})...")
+        self.set_status("Building fixed video with interpolated frames...")
         self.fix_btn.configure(state=tk.DISABLED)
 
         def do_fix():
             try:
+                fill_mode = self.fill_mode_var.get()
+
                 use_prores = "ProRes" in out_fmt
                 # Find ffmpeg - check PATH and common install locations
                 ffmpeg_path = shutil.which("ffmpeg")
@@ -2213,6 +1867,7 @@ class FrameDetectiveApp:
                     def __init__(self, proc):
                         self.proc = proc
                         self._stderr_lines = []
+                        # Drain stderr in background to prevent pipe deadlock
                         def _drain():
                             for line in proc.stderr:
                                 self._stderr_lines.append(line)
@@ -2233,28 +1888,41 @@ class FrameDetectiveApp:
                             raise RuntimeError(f"FFmpeg failed (code {self.proc.returncode}):\n{stderr[-500:]}")
 
                 if use_prores and has_ffmpeg:
+                    # ProRes HQ via FFmpeg
                     proc = subprocess.Popen([
                         ffmpeg_path, "-y",
-                        "-f", "rawvideo", "-pix_fmt", "bgr24",
+                        "-f", "rawvideo",
+                        "-pix_fmt", "bgr24",
                         "-s", f"{self.width}x{self.height}",
-                        "-r", str(self.fps), "-i", "-",
-                        "-c:v", "prores_ks", "-profile:v", "3",
-                        "-pix_fmt", "yuv422p10le", "-vendor", "apl0",
+                        "-r", str(self.fps),
+                        "-i", "-",
+                        "-c:v", "prores_ks",
+                        "-profile:v", "3",
+                        "-pix_fmt", "yuv422p10le",
+                        "-vendor", "apl0",
                         output_path
                     ], stdin=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=_SUBPROCESS_FLAGS)
                     out = FFmpegWriter(proc)
+
                 elif has_ffmpeg:
+                    # H.264 via FFmpeg at ~25 Mbps (high quality)
                     proc = subprocess.Popen([
                         ffmpeg_path, "-y",
-                        "-f", "rawvideo", "-pix_fmt", "bgr24",
+                        "-f", "rawvideo",
+                        "-pix_fmt", "bgr24",
                         "-s", f"{self.width}x{self.height}",
-                        "-r", str(self.fps), "-i", "-",
-                        "-c:v", "libx264", "-preset", "slow",
-                        "-b:v", "25M", "-pix_fmt", "yuv420p",
+                        "-r", str(self.fps),
+                        "-i", "-",
+                        "-c:v", "libx264",
+                        "-preset", "slow",
+                        "-b:v", "25M",
+                        "-pix_fmt", "yuv420p",
                         output_path
                     ], stdin=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=_SUBPROCESS_FLAGS)
                     out = FFmpegWriter(proc)
+
                 else:
+                    # Fallback: H.264 via OpenCV (lower quality)
                     fourcc = cv2.VideoWriter_fourcc(*'avc1')
                     out = cv2.VideoWriter(output_path, fourcc, self.fps,
                                            (self.width, self.height))
@@ -2264,63 +1932,72 @@ class FrameDetectiveApp:
                                                (self.width, self.height))
 
                 inserted = 0
-                replaced = 0
+                removed = 0
                 total_fixes = len(insert_plan) + len(replace_plan)
                 done = 0
-                last_written = None
+                last_written = None  # track last frame we actually wrote
+
+                topaz_prep = (fill_mode == "Duplicate (Fix Externally)")
 
                 for i, (frame_idx, frame) in enumerate(self.frames_data):
-
-                    # --- DIP: replace dip frame (never delete — preserves duration) ---
-                    if frame_idx in replace_plan:
-                        if route == "external":
-                            # Replace dip with copy of previous frame (Topaz will interpolate)
-                            replacement = last_written if last_written is not None else frame
-                        elif route == "internal":
-                            # RIFE interpolate between prev and next frame
-                            prev_f = last_written
-                            next_f = self.frames_data[i + 1][1] if i + 1 < len(self.frames_data) else frame
-                            if prev_f is not None:
-                                replacement = self.interpolate_frame_rife(prev_f, next_f, 0.5)
-                            else:
-                                replacement = frame
-                        elif route == "debug":
-                            # Black frame with label
-                            replacement = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-                            self._burn_label(replacement, f"F{frame_idx} [DIP]")
-
-                        out.write(replacement)
-                        last_written = replacement
-                        replaced += 1
+                    # --- Dip: skip (delete) the duplicate frame entirely ---
+                    # In Topaz Prep mode, ignore dips — pass them through for Topaz to handle
+                    if frame_idx in replace_plan and not topaz_prep:
+                        removed += 1
                         done += 1
                         self.root.after(0, lambda d=done, tf=total_fixes, fi=frame_idx: self.set_status(
-                            f"Fix {d}/{tf} — replaced dip frame F{fi}"
+                            f"Fix {d}/{tf} — removed dip frame F{fi}"
                         ))
-                        continue  # skip normal write — we already wrote the replacement
+                        continue  # don't write this frame at all
 
-                    # --- SPIKE: insert frame(s) before the spike frame ---
+                    # --- Spike: insert interpolated frames before writing the spike ---
                     if frame_idx in insert_plan:
                         insert_count = insert_plan[frame_idx]
+                        # Use last_written instead of frames_data[i-1]
+                        # This skips over any dips that were removed
                         prev_frame = last_written
 
                         for k in range(insert_count):
                             alpha = (k + 1) / (insert_count + 1)
 
-                            if route == "external":
-                                # Duplicate previous frame (Topaz will interpolate)
-                                fill = prev_frame if prev_frame is not None else frame
-                            elif route == "internal":
-                                # RIFE interpolation
-                                if prev_frame is not None:
-                                    fill = self.interpolate_frame_rife(prev_frame, frame, alpha)
-                                else:
-                                    fill = frame
-                            elif route == "debug":
-                                # Black frame with label
+                            if fill_mode == "Black":
                                 fill = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-                                self._burn_label(fill, f"INSERT {k+1}/{insert_count} @ F{frame_idx}")
+                                out.write(fill)
 
-                            out.write(fill)
+                            elif fill_mode == "White":
+                                fill = np.full((self.height, self.width, 3), 255, dtype=np.uint8)
+                                out.write(fill)
+
+                            elif fill_mode == "Blend (debug)":
+                                if prev_frame is not None:
+                                    blended = cv2.addWeighted(prev_frame, 1 - alpha, frame, alpha, 0)
+                                    out.write(blended)
+                                else:
+                                    out.write(frame)
+
+                            elif fill_mode == "RIFE (AI)":
+                                if prev_frame is not None:
+                                    interp = self.interpolate_frame_rife(prev_frame, frame, alpha)
+                                    out.write(interp)
+                                else:
+                                    out.write(frame)
+
+                            elif fill_mode == "RIFE + Labels":
+                                if prev_frame is not None:
+                                    interp = np.ascontiguousarray(self.interpolate_frame_rife(prev_frame, frame, alpha))
+                                else:
+                                    interp = frame.copy()
+                                label = f"INSERT {k+1}/{insert_count} @ F{frame_idx}"
+                                self._burn_label(interp, label)
+                                out.write(interp)
+
+                            elif fill_mode == "Duplicate (Fix Externally)":
+                                # Duplicate the previous frame so Topaz sees it and replaces it
+                                if prev_frame is not None:
+                                    out.write(prev_frame)
+                                else:
+                                    out.write(frame)
+
                             inserted += 1
 
                         done += 1
@@ -2328,8 +2005,8 @@ class FrameDetectiveApp:
                             f"Fix {d}/{tf} — inserted {ic} frame(s)..."
                         ))
 
-                    # --- Write original frame ---
-                    if route == "debug":
+                    # Write the original frame (spike frames stay, normal frames stay)
+                    if fill_mode == "RIFE + Labels":
                         labeled = np.ascontiguousarray(frame.copy())
                         label = f"F{frame_idx}"
                         if frame_idx in insert_plan:
@@ -2343,10 +2020,9 @@ class FrameDetectiveApp:
                 out.release()
 
                 codec_name = "ProRes HQ" if use_prores else "H.264"
-                route_label = route_names.get(route, route)
                 self.root.after(0, lambda: (
-                    self.log_msg(f"\nDone! Inserted {inserted} frames, replaced {replaced} dip frames.\n", "good"),
-                    self.log_msg(f"Route: {route_label} | Codec: {codec_name}\n", "good"),
+                    self.log_msg(f"\nDone! Inserted {inserted} frames, removed {removed} dip frames.\n", "good"),
+                    self.log_msg(f"Fill: {fill_mode} | Codec: {codec_name}\n", "good"),
                     self._log_clickable_path(output_path),
                     self.set_status(f"Saved: {output_path}"),
                     self.fix_btn.configure(state=tk.NORMAL)
@@ -2401,13 +2077,18 @@ class FrameDetectiveApp:
         self._rec_folder = rec_folder
         self._rec_ext = ext
         self.fix_btn.configure(state=tk.DISABLED)
+        self.recursive_btn.configure(state=tk.DISABLED)
         self.analyze_btn.configure(state=tk.DISABLED)
+        self.stop_btn.configure(state=tk.NORMAL)
 
         # Clear mini graphs
         for w in self.mini_graph_frame.winfo_children():
             w.destroy()
 
-        fill_mode = "RIFE (AI)"
+        fill_mode = self.fill_mode_var.get()
+        # Force RIFE for recursive (labels don't make sense here)
+        if fill_mode in ("Black", "White", "Blend (debug)", "RIFE + Labels"):
+            fill_mode = "RIFE (AI)"
 
         # Final output path
         output_path = str(rec_folder / (self.video_path.stem + "_final" + ext))
@@ -2418,8 +2099,8 @@ class FrameDetectiveApp:
 
     def _do_recursive(self, insert_plan, output_path, fill_mode, out_fmt):
         max_passes = 4
-        base_threshold = self.spike_threshold_var.get()
-        intensity = 5  # legacy default
+        base_threshold = self.threshold_var.get()
+        intensity = self.intensity_var.get()
         # Aggressive drop: intensity 1 = 0.15/pass, intensity 5 = 0.75/pass, intensity 10 = 1.50/pass
         drop_per_pass = intensity * 0.15
         pass_colors = ["#ff6b6b", "#ffaa44", "#44dd44", "#44aaff"]
@@ -2514,7 +2195,9 @@ class FrameDetectiveApp:
         finally:
             self.root.after(0, lambda: (
                 self.fix_btn.configure(state=tk.NORMAL),
-                self.analyze_btn.configure(state=tk.NORMAL)
+                self.recursive_btn.configure(state=tk.NORMAL),
+                self.analyze_btn.configure(state=tk.NORMAL),
+                self.stop_btn.configure(state=tk.DISABLED)
             ))
 
     def _build_fixed_frames(self, insert_plan, fill_mode):
@@ -2798,16 +2481,14 @@ class FrameDetectiveApp:
             return
 
         with open(output_path, "w") as f:
-            f.write(f"Frame Detective V3 Analysis Report\n")
+            f.write(f"Frame Detective Analysis Report\n")
             f.write(f"{'=' * 60}\n")
             f.write(f"File: {self.video_path}\n")
             f.write(f"Resolution: {self.width}x{self.height}\n")
             f.write(f"FPS: {self.fps:.2f}\n")
             f.write(f"Total frames: {len(self.magnitudes)}\n")
-            f.write(f"Spike threshold: {self.spike_threshold_var.get()}\n")
-            f.write(f"Dip threshold: {self.dip_threshold_var.get()}\n")
-            f.write(f"Spikes found: {len(self.spikes)}\n")
-            f.write(f"Dips found: {len(self.dips)}\n\n")
+            f.write(f"Threshold: {self.threshold_var.get()}\n")
+            f.write(f"Spikes found: {len(self.spikes)}\n\n")
 
             if self.spikes:
                 f.write("Spike Details:\n")
@@ -2825,149 +2506,6 @@ class FrameDetectiveApp:
 
         self.log_msg(f"\nReport saved: {output_path}\n", "good")
         self.set_status(f"Report saved.")
-
-    # ── Save / Load Project ──────────────────────────────────────────
-
-    def _build_project_data(self):
-        """Gather all state into a serializable dict."""
-        return {
-            "version": 3,
-            "video_path": str(self.video_path) if self.video_path else None,
-            "fps": self.fps,
-            "width": self.width,
-            "height": self.height,
-            "magnitudes": self.magnitudes,  # list of [frame_idx, mag]
-            "spikes": self.spikes,
-            "dips": self.dips,
-            "spike_threshold": self.spike_threshold_var.get(),
-            "dip_threshold": self.dip_threshold_var.get(),
-            "ignore_spikes": self.ignore_spikes_var.get(),
-            "ignore_dips": self.ignore_dips_var.get(),
-            "output_route": self.output_route_var.get(),
-            "output_format": self.output_format_var.get(),
-            "spike_entries": {str(f): v.get() for f, v in self.spike_entries.items()},
-            "spike_auto_counts": {str(f): v for f, v in self.spike_auto_counts.items()},
-            "dip_entries": list(self.dip_entries),
-            "user_overrides": {str(f): v for f, v in self.user_overrides.items()},
-        }
-
-    def save_project(self):
-        """Save project to current path, or prompt if none."""
-        if not self.magnitudes:
-            messagebox.showinfo("Nothing to save", "Analyze a video first.")
-            return
-        if self._project_path:
-            self._write_project(self._project_path)
-        else:
-            self.save_project_as()
-
-    def save_project_as(self):
-        """Save project to a new file."""
-        if not self.magnitudes:
-            messagebox.showinfo("Nothing to save", "Analyze a video first.")
-            return
-        initial = self.video_path.stem + ".fdp" if self.video_path else "project.fdp"
-        path = filedialog.asksaveasfilename(
-            title="Save Project",
-            defaultextension=".fdp",
-            filetypes=[("Frame Detective Project", "*.fdp")],
-            initialfile=initial
-        )
-        if not path:
-            return
-        self._project_path = path
-        self._write_project(path)
-
-    def _write_project(self, path):
-        """Write project data to disk."""
-        data = self._build_project_data()
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
-        self.log_msg(f"Project saved: {Path(path).name}\n", "good")
-        self.set_status(f"Saved: {path}")
-        self.root.title(f"Frame Detective V3 — {Path(path).name}")
-
-    def open_project(self):
-        """Load a saved project file."""
-        path = filedialog.askopenfilename(
-            title="Open Project",
-            filetypes=[("Frame Detective Project", "*.fdp"), ("All files", "*.*")]
-        )
-        if not path:
-            return
-
-        try:
-            with open(path, "r") as f:
-                data = json.load(f)
-        except Exception as e:
-            messagebox.showerror("Error", f"Could not read project file:\n{e}")
-            return
-
-        if data.get("version") != 3:
-            messagebox.showwarning("Version", "This project file may be from a different version.")
-
-        self._project_path = path
-
-        # Restore video path
-        vp = data.get("video_path")
-        if vp:
-            self.video_path = Path(vp)
-            self.file_label.configure(text=str(self.video_path))
-
-        # Restore analysis data
-        self.fps = data.get("fps", 0)
-        self.width = data.get("width", 0)
-        self.height = data.get("height", 0)
-        self.magnitudes = [tuple(m) for m in data.get("magnitudes", [])]
-        self.spikes = data.get("spikes", [])
-        self.dips = data.get("dips", [])
-
-        # Restore settings
-        self.spike_threshold_var.set(data.get("spike_threshold", 2.0))
-        self.dip_threshold_var.set(data.get("dip_threshold", 0.70))
-        self.ignore_spikes_var.set(data.get("ignore_spikes", False))
-        self.ignore_dips_var.set(data.get("ignore_dips", False))
-        self.output_route_var.set(data.get("output_route", "internal"))
-        self.output_format_var.set(data.get("output_format", "H.264 (.mp4)"))
-
-        # Restore dip_entries, auto counts, and user overrides first (needed by show_results)
-        self.dip_entries = set(data.get("dip_entries", []))
-        self.spike_auto_counts = {int(f): v for f, v in data.get("spike_auto_counts", {}).items()}
-        self.user_overrides = {int(f): v for f, v in data.get("user_overrides", {}).items()}
-
-        # Reload frame data from video (needed for preview and output)
-        self.frames_data = []
-        if self.video_path and self.video_path.exists():
-            cap = cv2.VideoCapture(str(self.video_path))
-            if cap.isOpened():
-                while True:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    idx = len(self.frames_data)
-                    self.frames_data.append((idx, frame))
-                cap.release()
-                self.log_msg(f"Reloaded {len(self.frames_data)} frames from video.\n")
-            else:
-                self.log_msg(f"Warning: could not open video {self.video_path}\n", "error")
-        else:
-            self.log_msg(f"Warning: video file not found — preview/output unavailable.\n", "error")
-
-        # Show results (builds chart + table)
-        self.show_results()
-
-        # Now override the spike_entries with saved user edits
-        saved_entries = data.get("spike_entries", {})
-        for f_str, count in saved_entries.items():
-            f = int(f_str)
-            if f in self.spike_entries:
-                self.spike_entries[f].set(count)
-
-        self.draw_chart()  # redraw with user overrides applied
-
-        self.log_msg(f"Opened project: {Path(path).name}\n", "good")
-        self.set_status(f"Opened: {path}")
-        self.root.title(f"Frame Detective V3 — {Path(path).name}")
 
 
 def main():
