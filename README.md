@@ -1,10 +1,10 @@
-# Frame Detective V3
+# Frame Detective Build 2
 
 Detect and fix missing or duplicate frames in AI-generated video.
 
-By Jonah Oskow
+By Jonah Oskow — [highlyappropriate.com](https://highlyappropriate.com)
 
-![Frame Detective](https://img.shields.io/badge/version-3.0-blue)
+![Frame Detective](https://img.shields.io/badge/build-2-blue)
 
 ## What It Does
 
@@ -14,56 +14,84 @@ Frame Detective analyzes video frame-by-frame using optical flow to find:
 
 Interactive chart with zoom, playback controls, and per-frame preview lets you review and fine-tune detections before fixing.
 
-## V3 Changes
-
-- Separate threshold sliders for spikes and dips (adjust without re-analyzing)
-- Ignore toggles to disable spike or dip detection independently
-- Three output routes: Prep for External Solve, Internal Solve (RIFE AI), Debug
-- Output format selection upfront (H.264 or ProRes HQ)
-- Dips are replaced (not deleted) — video duration is preserved
-
-## GPU Install (Recommended for Speed)
-
-For NVIDIA GPU acceleration with RIFE AI interpolation:
-
-1. Install [Python 3.10+](https://www.python.org/downloads/) (check "Add to PATH")
-2. Clone or download this repo
-3. Double-click **`Install_FrameDetective.bat`**
-4. Double-click **`Run_FrameDetective.bat`**
-
-The installer automatically detects your GPU and installs CUDA PyTorch. If no NVIDIA GPU is found, it falls back to CPU.
-
-### Manual Install
-
-```bash
-python -m venv frame_detective_env
-frame_detective_env\Scripts\pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-frame_detective_env\Scripts\pip install opencv-python-headless ccvfi Pillow
-frame_detective_env\Scripts\python frame_detective_gui.py
-```
-
-For CPU-only:
-```bash
-frame_detective_env\Scripts\pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-```
+## Three Output Routes
+1. **Prep for External Solve** — Duplicates frames for tools like Topaz Video AI to interpolate
+2. **Internal Solve** — Uses RIFE v4.26 AI interpolation (GPU accelerated)
+3. **Debug** — Black frames with burned-in labels for visual inspection
 
 ## Features
 
 - Separate spike and dip threshold sliders with instant re-detection
 - Ignore toggles for spikes and dips
+- Right-click chart bars to reclassify frames (spike ↔ dip ↔ disable)
+- User reclassifications persist across threshold changes
 - RIFE v4.26 AI frame interpolation (GPU accelerated)
-- Three output routes: Prep for External, Internal Solve, Debug
 - Interactive motion chart with zoom and moveable cursor
 - Video playback with speed control and loop
 - In/Out points for selective fixing
 - Per-frame review and manual adjustment
 - H.264 (25Mbps via FFmpeg) and ProRes HQ output
+- Save/Load projects (.fdp files)
+
+## Running from Source
+
+### Install Dependencies
+```bash
+pip install opencv-python-headless numpy Pillow ccvfi
+```
+
+For GPU (NVIDIA CUDA — recommended):
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+```
+
+For CPU only:
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+```
+
+### Run
+```bash
+python frame_detective_gui.py
+```
+
+### Optional
+- Install [FFmpeg](https://ffmpeg.org/) for H.264/ProRes output (falls back to OpenCV if not found)
+
+## Building the EXE
+
+The app can be packaged as a standalone `.exe` (~2.4 GB with GPU support).
+
+### Prerequisites
+```bash
+pip install pyinstaller
+```
+
+### Step 1: Download the RIFE model (required before building)
+```bash
+python -c "from ccvfi.auto.model import AutoModel; from ccvfi.type import ConfigType; AutoModel.from_pretrained(pretrained_model_name=ConfigType.RIFE_IFNet_v426_heavy)"
+```
+
+### Step 2: Build
+```bash
+pyinstaller FrameDetectiveV4.spec --clean
+```
+
+The EXE will be in `dist/`.
+
+### Important Build Notes
+
+**Do NOT exclude any torch modules from the spec file.** Torch's internal import chains are deeply tangled — excluding `torch.distributed`, `torch.testing`, `caffe2`, etc. will cause runtime crashes. The `excludes` list must stay empty.
+
+**RIFE model weights are bundled in the EXE.** The `ccvfi` package normally downloads model weights on first use, but this fails in a windowless EXE (no console for the download progress bar). The spec file bundles the `.pkl` model file, and the app code points to `sys._MEIPASS/cache_models/` when running frozen.
+
+**Kill any running EXE before rebuilding.** PyInstaller can't overwrite a locked file. The EXE may spawn child processes that survive window close — use Task Manager if needed.
 
 ## Requirements
 
 - Python 3.10+
-- FFmpeg (for H.264/ProRes output — optional, falls back to OpenCV)
 - NVIDIA GPU with CUDA support (optional, for fast RIFE interpolation)
+- FFmpeg (optional, for H.264/ProRes output)
 
 ## License
 

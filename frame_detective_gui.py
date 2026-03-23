@@ -29,7 +29,7 @@ if sys.platform == "win32":
 class FrameDetectiveApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Frame Detective V3")
+        self.root.title("Frame Detective Build 2")
         self.root.geometry("1100x920")
         self.root.configure(bg="#1a1a1a")
         self.root.resizable(True, True)
@@ -145,7 +145,7 @@ class FrameDetectiveApp:
             logo_label = tk.Label(title_row, image=self._logo_img, bg="#1a1a1a")
             logo_label.pack(side=tk.LEFT)
         else:
-            ttk.Label(title_row, text="Frame Detective V3", style="Title.TLabel").pack(side=tk.LEFT)
+            ttk.Label(title_row, text="Frame Detective Build 2", style="Title.TLabel").pack(side=tk.LEFT)
 
         # Website link button
         ha_btn = tk.Button(title_row, text="highlyappropriate.com", fg="#6699cc",
@@ -2099,9 +2099,16 @@ class FrameDetectiveApp:
         if hasattr(self, '_rife_model') and hasattr(self, '_rife_fp32') and self._rife_fp32 != want_fp32:
             del self._rife_model
         if not hasattr(self, '_rife_model'):
+            import sys
             from ccvfi import AutoModel, ConfigType, VFIBaseModel
+            # When running as frozen EXE, point to bundled model weights
+            model_dir = None
+            if getattr(sys, 'frozen', False):
+                meipass = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+                model_dir = os.path.join(meipass, 'cache_models')
             self._rife_model: VFIBaseModel = AutoModel.from_pretrained(
                 pretrained_model_name=ConfigType.RIFE_IFNet_v426_heavy,
+                model_dir=model_dir,
             )
             if want_fp32:
                 self._rife_model.fp16 = False
@@ -2798,7 +2805,7 @@ class FrameDetectiveApp:
             return
 
         with open(output_path, "w") as f:
-            f.write(f"Frame Detective V3 Analysis Report\n")
+            f.write(f"Frame Detective Build 2 Analysis Report\n")
             f.write(f"{'=' * 60}\n")
             f.write(f"File: {self.video_path}\n")
             f.write(f"Resolution: {self.width}x{self.height}\n")
@@ -2885,7 +2892,7 @@ class FrameDetectiveApp:
             json.dump(data, f, indent=2)
         self.log_msg(f"Project saved: {Path(path).name}\n", "good")
         self.set_status(f"Saved: {path}")
-        self.root.title(f"Frame Detective V3 — {Path(path).name}")
+        self.root.title(f"Frame Detective Build 2 — {Path(path).name}")
 
     def open_project(self):
         """Load a saved project file."""
@@ -2967,7 +2974,7 @@ class FrameDetectiveApp:
 
         self.log_msg(f"Opened project: {Path(path).name}\n", "good")
         self.set_status(f"Opened: {path}")
-        self.root.title(f"Frame Detective V3 — {Path(path).name}")
+        self.root.title(f"Frame Detective Build 2 — {Path(path).name}")
 
 
 def main():
